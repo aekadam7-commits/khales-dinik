@@ -2,10 +2,16 @@ name: Build APK
 
 on:
   push:
+    paths-ignore:
+      - '**.md'
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -27,18 +33,49 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: تفعيل مفتاح التوقيع الثابت
+        run: |
+          mkdir -p ~/.android
+          cp app/signing/debug.keystore ~/.android/debug.keystore
+
+      - name: كاش Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-cap6-v1
+          restore-keys: gradle-
+
       - name: تثبيت وإضافة أندرويد
         working-directory: app
         run: |
           npm install
           npx cap add android
+
+      - name: توليد الأيقونة
+        working-directory: app
+        continue-on-error: true
+        run: npx --yes @capacitor/assets@3.0.5 generate --android
+
+      - name: مزامنة ورقم الإصدار
+        working-directory: app
+        run: |
           npx cap sync android
+          sed -i "s/versionCode 1/versionCode ${{ github.run_number }}/" android/app/build.gradle
+          sed -i "s/versionName \"1.0\"/versionName \"1.${{ github.run_number }}\"/" android/app/build.gradle
+          grep -n "versionCode\|versionName" android/app/build.gradle
 
       - name: بناء APK
         working-directory: app/android
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug
+
+      - name: التحقق من التوقيع
+        run: |
+          APK=app/android/app/build/outputs/apk/debug/app-debug.apk
+          $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)/apksigner verify --print-certs $APK | head -3
 
       - name: تسمية الـ APK
         run: cp app/android/app/build/outputs/apk/debug/app-debug.apk masrouf.apk
@@ -53,5 +90,12 @@ jobs:
         with:
           tag_name: v${{ github.run_number }}
           name: مصروفي v${{ github.run_number }}
-          body: نسخة جديدة من التطبيق. حمّل الملف masrouf.apk وثبّته على هاتفك.
+          body: نسخة جديدة من التطبيق. حمّل الملف masrouf.apk وثبّته فوق النسخة السابقة (البيانات تبقى محفوظة).
           files: masrouf.apk
+
+      - name: الإبقاء على آخر 5 إصدارات فقط
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 100 --json tagName --jq '.[5:][].tagName' | xargs -r -n1 gh release delete --cleanup-tag -y
